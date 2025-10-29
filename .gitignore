@@ -1,0 +1,26 @@
+﻿[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Mm]emoryCaptures/
+UserSettings/
+.sysinfo.txt
+
+# IDE & OS
+.vs/
+.idea/
+*.csproj
+*.sln
+*.suo
+*.user
+*.pidb
+*.mdb
+*.pdb
+.DS_Store
+Thumbs.db
+
+# Artifacts
+*.apk
+*.aab
