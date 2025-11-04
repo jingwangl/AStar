@@ -4,14 +4,9 @@ using UnityEngine;
 [ExecuteAlways]
 public class GridGraph2D : MonoBehaviour
 {
-    [Header("网格尺寸")]
-    public Vector2 gridWorldSize = new Vector2(20, 12);
-    [Tooltip("单元半径（格子大小=半径*2）")]
-    public float nodeRadius = 0.25f;
-
-    [Header("可行区域检测")]
-    public LayerMask obstacleMask;        // 可留空：用任何2D Collider都视为障碍
-    public float obstacleCheckRadius = 0.24f;
+    [Header("网格尺寸（仅需两个参数）")]
+    public int columns = 20;                 // 横向格子数
+    public int rows = 12;                    // 纵向格子数
 
     [Header("可视化")]
     public bool drawGrid = true;
@@ -19,70 +14,94 @@ public class GridGraph2D : MonoBehaviour
     public Color unwalkableColor = new Color(0.9f, 0.2f, 0.2f, 0.55f);
     public Color pathColor = new Color(0.2f, 0.8f, 0.2f, 0.9f);
 
+    // 内部网格
     Node[,] grid;
-    float nodeDiameter;
-    int gridSizeX, gridSizeY;
 
-    public int GridSizeX => gridSizeX;
-    public int GridSizeY => gridSizeY;
-    public float NodeDiameter => nodeDiameter;
+    // 统一单元尺寸：1 个世界单位
+    const float cellSize = 1f;
+
+    // 兼容旧接口（供其它脚本读取）
+    public int GridSizeX => columns;
+    public int GridSizeY => rows;
+    public float NodeDiameter => cellSize;
+    public float nodeRadius => cellSize * 0.5f;
+    public Vector2 gridWorldSize => new Vector2(columns * cellSize, rows * cellSize);
 
     List<Node> debugPath;
 
-    public int MaxSize => gridSizeX * gridSizeY;
+    public int MaxSize => columns * rows;
 
     void OnEnable() => CreateGrid();
     void OnValidate() => CreateGrid();
 
     public void CreateGrid()
     {
-        nodeDiameter = nodeRadius * 2f;
-        gridSizeX = Mathf.Max(2, Mathf.RoundToInt(gridWorldSize.x / nodeDiameter));
-        gridSizeY = Mathf.Max(2, Mathf.RoundToInt(gridWorldSize.y / nodeDiameter));
-        grid = new Node[gridSizeX, gridSizeY];
+        columns = Mathf.Max(1, columns);
+        rows = Mathf.Max(1, rows);
+        grid = new Node[columns, rows];
 
         Vector2 worldBottomLeft = (Vector2)transform.position
-                                  - Vector2.right  * gridWorldSize.x / 2f
-                                  - Vector2.up     * gridWorldSize.y / 2f;
+                                  - Vector2.right  * (columns * cellSize) / 2f
+                                  - Vector2.up     * (rows * cellSize) / 2f;
 
-        for (int x = 0; x < gridSizeX; x++)
+        for (int x = 0; x < columns; x++)
         {
-            for (int y = 0; y < gridSizeY; y++)
+            for (int y = 0; y < rows; y++)
             {
                 Vector2 worldPoint = worldBottomLeft
-                    + Vector2.right * (x * nodeDiameter + nodeRadius)
-                    + Vector2.up    * (y * nodeDiameter + nodeRadius);
+                    + Vector2.right * (x * cellSize + nodeRadius)
+                    + Vector2.up    * (y * cellSize + nodeRadius);
 
-                bool walkable = !Physics2D.OverlapCircle(worldPoint, obstacleCheckRadius, obstacleMask.value == 0 ? ~0 : obstacleMask);
-                grid[x, y] = new Node(walkable, worldPoint, x, y);
+                // 不再做可行区域检测：默认全部可走
+                grid[x, y] = new Node(true, worldPoint, x, y);
             }
         }
     }
 
     public Node NodeFromWorldPoint(Vector2 worldPos)
     {
-        float percentX = Mathf.Clamp01((worldPos.x - (transform.position.x - gridWorldSize.x / 2f)) / gridWorldSize.x);
-        float percentY = Mathf.Clamp01((worldPos.y - (transform.position.y - gridWorldSize.y / 2f)) / gridWorldSize.y);
-        int x = Mathf.Clamp(Mathf.RoundToInt((gridSizeX - 1) * percentX), 0, gridSizeX - 1);
-        int y = Mathf.Clamp(Mathf.RoundToInt((gridSizeY - 1) * percentY), 0, gridSizeY - 1);
+        Vector2 worldBottomLeft = (Vector2)transform.position
+                                  - Vector2.right  * (columns * cellSize) / 2f
+                                  - Vector2.up     * (rows * cellSize) / 2f;
+
+        float dx = worldPos.x - worldBottomLeft.x;
+        float dy = worldPos.y - worldBottomLeft.y;
+        int x = Mathf.Clamp(Mathf.FloorToInt(dx / cellSize), 0, columns - 1);
+        int y = Mathf.Clamp(Mathf.FloorToInt(dy / cellSize), 0, rows - 1);
         return grid[x, y];
     }
 
-    public IEnumerable<Node> GetNeighbours(Node node, bool allowDiagonal)
+    public IEnumerable<Node> GetNeighbours(Node node)
     {
-        for (int dx = -1; dx <= 1; dx++)
-        {
-            for (int dy = -1; dy <= 1; dy++)
-            {
-                if (dx == 0 && dy == 0) continue;
-                if (!allowDiagonal && Mathf.Abs(dx) + Mathf.Abs(dy) != 1) continue;
+        // 仅四方向邻居（上、下、左、右）
+        int x = node.gridX;
+        int y = node.gridY;
 
-                int nx = node.gridX + dx;
-                int ny = node.gridY + dy;
-                if (nx >= 0 && nx < gridSizeX && ny >= 0 && ny < gridSizeY)
-                    yield return grid[nx, ny];
-            }
-        }
+        if (x - 1 >= 0) yield return grid[x - 1, y];
+        if (x + 1 < columns) yield return grid[x + 1, y];
+        if (y - 1 >= 0) yield return grid[x, y - 1];
+        if (y + 1 < rows) yield return grid[x, y + 1];
+    }
+
+    // 供外部手动标记阻塞（替代物理检测）
+    public void SetBlock(int x, int y, bool blocked)
+    {
+        if (x < 0 || x >= columns || y < 0 || y >= rows) return;
+        grid[x, y].walkable = !blocked;
+    }
+
+    public void BlockNode(Node n)
+    {
+        if (n == null) return;
+        SetBlock(n.gridX, n.gridY, true);
+    }
+
+    public void ClearAllBlocks()
+    {
+        if (grid == null) return;
+        for (int x = 0; x < columns; x++)
+            for (int y = 0; y < rows; y++)
+                grid[x, y].walkable = true;
     }
 
     public void SetDebugPath(List<Node> path) => debugPath = path;
@@ -97,14 +116,14 @@ public class GridGraph2D : MonoBehaviour
         foreach (var n in grid)
         {
             Gizmos.color = n.walkable ? walkableColor : unwalkableColor;
-            Gizmos.DrawCube(n.worldPos, Vector3.one * (nodeDiameter * 0.95f));
+            Gizmos.DrawCube(n.worldPos, Vector3.one * (NodeDiameter * 0.95f));
         }
 
         if (debugPath != null)
         {
             Gizmos.color = pathColor;
             foreach (var n in debugPath)
-                Gizmos.DrawCube(n.worldPos, Vector3.one * (nodeDiameter * 0.9f));
+                Gizmos.DrawCube(n.worldPos, Vector3.one * (NodeDiameter * 0.9f));
         }
     }
 }

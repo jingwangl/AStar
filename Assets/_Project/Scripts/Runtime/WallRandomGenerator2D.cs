@@ -2,14 +2,14 @@ using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
-/// 随机迷宫生成（2D 网格）
-/// - 使用“递归回溯 / 深度优先”挖迷宫，奇数格为通路、偶数格为墙
-/// - 在 ObstaclesRoot 下实例化墙块（带 BoxCollider2D 可选 SpriteRenderer）
-/// - 生成后自动调用 GridGraph2D.CreateGrid() 让 A* 使用最新障碍
+/// 随机障碍生成器（2D 网格）
+/// - 按密度在网格上随机生成墙体（支持保护角色周围空地）
+/// - 在 ObstaclesRoot 下实例化墙块（SpriteRenderer+BoxCollider2D 可选）
+/// - 同步写入 GridGraph2D 的阻塞表，A* 即可使用
 /// 触发：
 ///   - 运行时按 G
-///   - Inspector 上下文菜单 [ContextMenu("立即生成迷宫")]
-///   - UI Button 绑定 GenerateMaze()
+///   - Inspector 上下文菜单 [ContextMenu("生成随机障碍")]
+///   - UI Button 绑定 Generate()
 /// </summary>
 [DisallowMultipleComponent]
 public class MazeRandomGenerator2D : MonoBehaviour
@@ -19,10 +19,16 @@ public class MazeRandomGenerator2D : MonoBehaviour
     public Transform obstaclesRoot;          // 所有墙体的父节点
     public Transform agent;                  // 需要避让的角色
 
-    [Header("迷宫尺寸（格子数）")]
-    [Tooltip("迷宫逻辑尺寸(列 x 行)，需与 GridGraph2D 的网格采样一致")]
+    [Header("尺寸（格子数）")]
+    [Tooltip("逻辑尺寸(列 x 行)，与 GridGraph2D 对齐")]
     public int columns = 20;                 // 列数
     public int rows = 12;                    // 行数
+
+    [Header("随机障碍参数")]
+    [Range(0f, 0.9f)] public float obstacleDensity = 0.25f; // 障碍密度（0~0.9）
+    public int randomSeed = 0;                                // 0=自动随机
+    public bool protectAgentArea = true;                      // 保护角色附近空地
+    [Range(0, 3)] public int protectRadius = 1;               // 保护半径（格）
 
     [Header("外观与碰撞")]
     public bool addSpriteRenderer = true;    // 是否给墙体添加 SpriteRenderer
@@ -30,9 +36,6 @@ public class MazeRandomGenerator2D : MonoBehaviour
     public Vector2 wallTilePadding = new Vector2(0.95f, 0.95f); // 视觉缩放比例
     public string wallLayerName = "";        // 可选：墙体图层名
     public PhysicsMaterial2D wallPhysicsMaterial; // 可选：墙体物理材质
-
-    [Header("随机种子")]
-    public int seed = 0;                     // 0 表示自动随机
 
     [Header("调试")]
     public bool autoRegenerateOnPlay = false; // Play 时是否自动生成
@@ -47,19 +50,16 @@ public class MazeRandomGenerator2D : MonoBehaviour
 
     void Start()
     {
-        if (autoRegenerateOnPlay) GenerateMaze();
+        if (autoRegenerateOnPlay) Generate();
     }
 
     void Update()
     {
-        if (Input.GetKeyDown(KeyCode.G))
-        {
-            GenerateMaze();
-        }
+        if (Input.GetKeyDown(KeyCode.G)) Generate();
     }
 
-    [ContextMenu("立即生成迷宫")]
-    public void GenerateMaze()
+    [ContextMenu("生成随机障碍")]
+    public void Generate()
     {
         if (!ValidateSetup()) return;
 
@@ -67,7 +67,7 @@ public class MazeRandomGenerator2D : MonoBehaviour
         SyncWithGrid();
 
         // 2) 生成布尔阵列（true=通路/可走；false=墙）
-        var passable = GeneratePassableArray(columns, rows);
+        bool[,] passable = GenerateRandomPassableArray(columns, rows, obstacleDensity, randomSeed);
 
         // 3) 清空旧的墙体
         ClearObstacles();
@@ -75,10 +75,11 @@ public class MazeRandomGenerator2D : MonoBehaviour
         // 4) 按 passable 实例化墙块
         BuildWalls(passable);
 
-        // 5) 让 GridGraph2D 重建可走/不可走
-        grid.CreateGrid();
+        // 5) 将墙体写入 GridGraph2D 的阻塞标记
+        grid.ClearAllBlocks();
+        ApplyBlocksToGrid(passable);
 
-        Debug.Log($"[MazeRandomGenerator2D] 已生成迷宫：{columns}x{rows}，节点尺寸={nodeDiameter:F2}");
+        Debug.Log($"[MazeRandomGenerator2D] 已生成随机障碍：尺寸={columns}x{rows}，节点尺寸={nodeDiameter:F2}");
     }
 
     bool ValidateSetup()
@@ -110,70 +111,43 @@ public class MazeRandomGenerator2D : MonoBehaviour
         rows = Mathf.Max(5, grid.GridSizeY);
     }
 
-    bool[,] GeneratePassableArray(int cols, int rws)
+
+    // 随机障碍：根据密度生成阻塞，保护角色周围一定半径
+    bool[,] GenerateRandomPassableArray(int cols, int rws, float density, int seed)
     {
-        // 递归回溯：奇数坐标为“房间”，偶数为墙，起点(1,1)
         bool[,] pass = new bool[cols, rws];
+        var rng = (seed == 0) ? new System.Random() : new System.Random(seed);
+        density = Mathf.Clamp01(density);
 
-        // 全部置墙
         for (int x = 0; x < cols; x++)
-            for (int y = 0; y < rws; y++)
-                pass[x, y] = false;
-
-        System.Random rng = (seed == 0) ? new System.Random() : new System.Random(seed);
-
-        // 起点
-        int sx = 1, sy = 1;
-        pass[sx, sy] = true;
-
-        // 深度优先栈
-        Stack<(int x, int y)> st = new Stack<(int x, int y)>();
-        st.Push((sx, sy));
-
-        (int x, int y)[] dirs = new (int, int)[] { (2,0), (-2,0), (0,2), (0,-2) };
-
-        while (st.Count > 0)
         {
-            var cur = st.Pop();
-
-            // 打乱邻居方向
-            Shuffle(dirs, rng);
-
-            foreach (var d in dirs)
+            for (int y = 0; y < rws; y++)
             {
-                int nx = cur.x + d.x;
-                int ny = cur.y + d.y;
+                // true=可走，按密度反向取样
+                pass[x, y] = rng.NextDouble() >= density;
+            }
+        }
 
-                if (nx > 0 && nx < cols - 1 && ny > 0 && ny < rws - 1 && !pass[nx, ny])
+        // 保护角色周围空地
+        if (protectAgentArea && agent != null && grid != null)
+        {
+            var n = grid.NodeFromWorldPoint(agent.position);
+            int cx = Mathf.Clamp(n.gridX, 0, cols - 1);
+            int cy = Mathf.Clamp(n.gridY, 0, rws - 1);
+            int r = Mathf.Max(0, protectRadius);
+            for (int x = cx - r; x <= cx + r; x++)
+            {
+                for (int y = cy - r; y <= cy + r; y++)
                 {
-                    // 挖通中间墙
-                    int wx = cur.x + d.x / 2;
-                    int wy = cur.y + d.y / 2;
-                    pass[wx, wy] = true;
-                    pass[nx, ny] = true;
-
-                    st.Push((cur.x, cur.y)); // 回溯点
-                    st.Push((nx, ny));
-                    break;
+                    if (x >= 0 && x < cols && y >= 0 && y < rws)
+                        pass[x, y] = true;
                 }
             }
         }
 
-        // 入口/出口（可选）
-        pass[1, 0] = true;                // 顶部开口
-        pass[cols - 2, rws - 1] = true;   // 底部开口
-
         return pass;
     }
 
-    void Shuffle((int x, int y)[] a, System.Random rng)
-    {
-        for (int i = a.Length - 1; i > 0; i--)
-        {
-            int k = rng.Next(i + 1);
-            var t = a[i]; a[i] = a[k]; a[k] = t;
-        }
-    }
 
     void ClearObstacles()
     {
@@ -251,11 +225,26 @@ public class MazeRandomGenerator2D : MonoBehaviour
                     // 如果没有精灵，则保持缺省缩放
                 }
 
-                // 碰撞体（供 GridGraph2D 检测）
+                // 碰撞体（可选，仅用于物理阻挡，与网格阻塞无关）
                 var bc = go.AddComponent<BoxCollider2D>();
                 bc.size = new Vector2(nodeDiameter * wallTilePadding.x, nodeDiameter * wallTilePadding.y);
                 bc.sharedMaterial = wallPhysicsMaterial;
                 bc.usedByComposite = false;
+            }
+        }
+    }
+
+    // 将 passable 阵列写入 GridGraph2D
+    void ApplyBlocksToGrid(bool[,] passable)
+    {
+        int cols = passable.GetLength(0);
+        int rws  = passable.GetLength(1);
+        for (int x = 0; x < cols; x++)
+        {
+            for (int y = 0; y < rws; y++)
+            {
+                bool blocked = !passable[x, y];
+                grid.SetBlock(x, y, blocked);
             }
         }
     }

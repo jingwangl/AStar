@@ -7,11 +7,17 @@ public class PathfindingAStar : MonoBehaviour
     public GridGraph2D grid;            // 拖拽 GridGraph2D
     public Transform agent;             // 你的小球
     public LineRenderer line;           // 用于显示路径（可空）
-    public bool allowDiagonal = false;
+    
 
     [Header("Move")]
     public float moveSpeed = 4f;
     public float waypointTolerance = 0.05f;
+
+    [Header("Visualization")]
+    public bool visualizeSearch = false;            // 是否可视化搜索过程
+    public int stepsPerFrame = 1;                   // 每帧推进多少个搜索步骤
+    public float stepDelay = 0.02f;                 // 每批步骤后延迟，0 为不延迟
+    public SearchVisualizer2D visualizer;           // 可视化组件（可空）
 
     List<Node> currentPath;
     bool moving;
@@ -64,8 +70,22 @@ public class PathfindingAStar : MonoBehaviour
         var startNode = grid.NodeFromWorldPoint(agent.position);
         var targetNode = grid.NodeFromWorldPoint(targetWorldPos);
 
+        // 开启新一轮寻路：先停止上一轮所有协程并清空可视化与路径线
+        StopAllCoroutines();
+        if (visualizer != null) visualizer.ClearAll();
+        if (line != null) ApplyLineRenderer(null);
+        if (grid != null) grid.SetDebugPath(new List<Node>()); // 清空网格调试路径
+        if (visualizer != null) visualizer.HighlightStartTarget(startNode, targetNode);
+
+        if (visualizeSearch)
+        {
+            // 可视化逐步搜索（仅四方向）
+            StartCoroutine(FindAndFollowPathVisual(startNode, targetNode));
+            return;
+        }
+
         var oldPath = currentPath;
-        var newPath = FindPath(startNode, targetNode, allowDiagonal);
+        var newPath = FindPath(startNode, targetNode);
 
         if (newPath != null && newPath.Count > 0)
         {
@@ -141,11 +161,11 @@ public class PathfindingAStar : MonoBehaviour
         {
             int comp = fCost.CompareTo(other.fCost);
             if (comp == 0) comp = hCost.CompareTo(other.hCost);
-            return -comp; // 小值优先 -> 返回相反
+            return comp; // 小值优先 -> 直接按升序
         }
     }
 
-    List<Node> FindPath(Node start, Node target, bool allowDiagonalMove)
+    List<Node> FindPath(Node start, Node target)
     {
         if (!start.walkable || !target.walkable) { Debug.LogWarning("起点或终点不可达"); return new List<Node>(); }
 
@@ -176,7 +196,7 @@ public class PathfindingAStar : MonoBehaviour
 
             closed.Add(current.n);
 
-            foreach (var neighbour in grid.GetNeighbours(current.n, allowDiagonalMove))
+            foreach (var neighbour in grid.GetNeighbours(current.n))
             {
                 if (!neighbour.walkable || closed.Contains(neighbour)) continue;
 
@@ -204,8 +224,8 @@ public class PathfindingAStar : MonoBehaviour
     {
         int dstX = Mathf.Abs(a.gridX - b.gridX);
         int dstY = Mathf.Abs(a.gridY - b.gridY);
-        // 对角=14，直=10 的常见“八方向”代价（缩放避免浮点）
-        return 14 * Mathf.Min(dstX, dstY) + 10 * Mathf.Abs(dstX - dstY);
+        // 曼哈顿距离（四方向）：每步代价 10
+        return 10 * (dstX + dstY);
     }
 
     List<Node> RetracePath(PathNode end)
@@ -215,5 +235,110 @@ public class PathfindingAStar : MonoBehaviour
         while (cur != null) { path.Add(cur.n); cur = cur.parent; }
         path.Reverse();
         return path;
+    }
+
+    // ======== 逐步可视化版 A*（协程） ========
+    System.Collections.IEnumerator FindAndFollowPathVisual(Node start, Node target)
+    {
+        // 清理可视化状态
+        if (visualizer != null)
+        {
+            visualizer.ClearAll();
+            visualizer.HighlightStartTarget(start, target);
+        }
+
+        if (!start.walkable || !target.walkable)
+        {
+            Debug.LogWarning("起点或终点不可达");
+            yield break;
+        }
+
+        var open = new Heap<PathNode>(grid.MaxSize);
+        var map = new Dictionary<Node, PathNode>(grid.MaxSize);
+        var closed = new HashSet<Node>();
+
+        PathNode GetOrAdd(Node n)
+        {
+            if (!map.TryGetValue(n, out var pn))
+            {
+                pn = new PathNode { n = n, gCost = int.MaxValue, hCost = 0, parent = null };
+                map[n] = pn;
+            }
+            return pn;
+        }
+
+        var startPN = GetOrAdd(start);
+        startPN.gCost = 0;
+        startPN.hCost = Heuristic(start, target);
+        open.Add(startPN);
+        if (visualizer != null) visualizer.SetState(start, SearchVisualizer2D.NodeVisState.Open);
+
+        int stepCounter = 0;
+        bool found = false;
+        PathNode endPN = null;
+
+        while (open.Count > 0)
+        {
+            var current = open.RemoveFirst();
+            if (visualizer != null) visualizer.SetState(current.n, SearchVisualizer2D.NodeVisState.Current);
+
+            // 步进节流
+            if (++stepCounter % Mathf.Max(1, stepsPerFrame) == 0)
+            {
+                if (stepDelay > 0f) yield return new WaitForSeconds(stepDelay); else yield return null;
+            }
+
+            if (current.n == target)
+            {
+                found = true;
+                endPN = current;
+                break;
+            }
+
+            closed.Add(current.n);
+
+            foreach (var neighbour in grid.GetNeighbours(current.n))
+            {
+                if (!neighbour.walkable || closed.Contains(neighbour)) continue;
+
+                int newCost = current.gCost + Distance(current.n, neighbour);
+                var neighPN = GetOrAdd(neighbour);
+
+                if (newCost < neighPN.gCost)
+                {
+                    neighPN.gCost = newCost;
+                    neighPN.hCost = Heuristic(neighbour, target);
+                    neighPN.parent = current;
+
+                    if (!open.Contains(neighPN)) open.Add(neighPN); else open.UpdateItem(neighPN);
+                    if (visualizer != null) visualizer.SetState(neighbour, SearchVisualizer2D.NodeVisState.Open);
+
+                    // 步进节流
+                    if (++stepCounter % Mathf.Max(1, stepsPerFrame) == 0)
+                    {
+                        if (stepDelay > 0f) yield return new WaitForSeconds(stepDelay); else yield return null;
+                    }
+                }
+            }
+
+            if (visualizer != null) visualizer.SetState(current.n, SearchVisualizer2D.NodeVisState.Closed);
+        }
+
+        if (!found)
+        {
+            Debug.LogWarning("未找到路径");
+            yield break;
+        }
+
+        var path = RetracePath(endPN);
+        currentPath = path;
+
+        if (visualizer != null) visualizer.SetPath(path);
+        grid.SetDebugPath(path);
+        ApplyLineRenderer(path);
+
+        moving = false;
+        StopAllCoroutines();
+        StartCoroutine(FollowPath());
     }
 }

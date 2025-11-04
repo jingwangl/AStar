@@ -92,8 +92,8 @@ public class WallEditor : MonoBehaviour
         GameObject wallObj = CreateWallObject(wallPos);
         createdWalls.Add(wallObj);
 
-        // 重新采样网格，刷新可走信息
-        grid.CreateGrid();
+        // 直接标记网格为阻塞（不再依赖物理碰撞体采样）
+        grid.BlockNode(targetNode);
 
         Debug.Log($"[WallEditor] 已在 {wallPos} 生成墙体");
     }
@@ -182,10 +182,10 @@ public class WallEditor : MonoBehaviour
 #endif
         }
 
-        // 重建网格
+        // 取消所有阻塞
         if (grid != null)
         {
-            grid.CreateGrid();
+            grid.ClearAllBlocks();
         }
 
         Debug.Log("[WallEditor] 已清空所有墙体。");
